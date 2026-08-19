@@ -1,0 +1,92 @@
+name: Sync Upstream
+
+# Keeps this mirror's `main` in step with the canonical repository,
+# https://github.com/sickn33/agentic-awesome-skills. Runs daily and can
+# also be triggered manually from the Actions tab.
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-upstream:
+    if: github.repository == 'ntxnasty-spec/agentic-awesome-skills'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          ref: main
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch canonical upstream
+        run: |
+          git remote add upstream https://github.com/sickn33/agentic-awesome-skills.git
+          git fetch upstream main
+
+      - name: Compare against upstream
+        id: diff
+        run: |
+          upstream_head="$(git rev-parse upstream/main)"
+          local_head="$(git rev-parse HEAD)"
+
+          if [ "$upstream_head" = "$local_head" ]; then
+            status=up-to-date
+          elif git merge-base --is-ancestor HEAD upstream/main; then
+            status=fast-forward
+          else
+            status=diverged
+          fi
+
+          echo "status=$status" >> "$GITHUB_OUTPUT"
+          echo "upstream_head=$upstream_head" >> "$GITHUB_OUTPUT"
+          echo "Sync status: $status ($local_head -> $upstream_head)"
+
+      - name: Fast-forward main to upstream
+        id: push
+        if: steps.diff.outputs.status == 'fast-forward'
+        run: |
+          git merge --ff-only upstream/main
+          if git push origin main; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Direct push to main was rejected (likely a protected branch); falling back to a pull request."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Open a PR when a direct push isn't possible
+        if: steps.diff.outputs.status == 'diverged' || (steps.diff.outputs.status == 'fast-forward' && steps.push.outputs.pushed == 'false')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          branch="automation/sync-upstream"
+          git push origin --force upstream/main:"refs/heads/$branch"
+
+          state="$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)"
+          if [ "$state" = "OPEN" ]; then
+            echo "PR for $branch is already open; branch updated in place."
+            exit 0
+          fi
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --draft \
+            --title "chore: sync with sickn33/agentic-awesome-skills" \
+            --body "Brings \`main\` up to date with the canonical upstream repository, [sickn33/agentic-awesome-skills](https://github.com/sickn33/agentic-awesome-skills) (\`${{ steps.diff.outputs.upstream_head }}\`).
+
+          Opened automatically by the Sync Upstream workflow because \`main\` could not be fast-forwarded directly (branch protection or local history that diverged from upstream). Review the diff before merging."
