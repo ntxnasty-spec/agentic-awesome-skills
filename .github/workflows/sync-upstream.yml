@@ -3,6 +3,17 @@ name: Sync Upstream
 # Keeps this mirror's `main` in step with the canonical repository,
 # https://github.com/sickn33/agentic-awesome-skills. Runs daily and can
 # also be triggered manually from the Actions tab.
+#
+# Four states are possible, and they are all normal:
+#   up-to-date   main and upstream/main are the same commit -> nothing to do
+#   fast-forward upstream is strictly ahead                 -> push main forward
+#   local-ahead  this fork carries commits upstream lacks,
+#                and upstream has nothing new               -> nothing to do
+#   diverged     both sides have unique commits             -> merge PR for review
+#
+# Because this fork keeps its own commits (this workflow, for one), `diverged`
+# is the expected state whenever upstream moves; the fast-forward path only
+# applies while the fork carries no commits of its own.
 
 on:
   schedule:
@@ -54,6 +65,8 @@ jobs:
             status=up-to-date
           elif git merge-base --is-ancestor HEAD upstream/main; then
             status=fast-forward
+          elif git merge-base --is-ancestor upstream/main HEAD; then
+            status=local-ahead
           else
             status=diverged
           fi
@@ -61,6 +74,17 @@ jobs:
           echo "status=$status" >> "$GITHUB_OUTPUT"
           echo "upstream_head=$upstream_head" >> "$GITHUB_OUTPUT"
           echo "Sync status: $status ($local_head -> $upstream_head)"
+
+      - name: Report a no-op sync
+        if: steps.diff.outputs.status == 'up-to-date' || steps.diff.outputs.status == 'local-ahead'
+        run: |
+          set -euo pipefail
+
+          if [ "${{ steps.diff.outputs.status }}" = "up-to-date" ]; then
+            echo "main already matches upstream; nothing to sync."
+          else
+            echo "main carries commits upstream does not have, and upstream has nothing new; nothing to sync."
+          fi
 
       - name: Fast-forward main to upstream
         id: push
@@ -92,11 +116,12 @@ jobs:
           gh workflow run ci.yml --ref main \
             || echo "::warning::Could not dispatch ci.yml; run it manually against main."
 
-      - name: Open a PR when a direct push isn't possible
+      - name: Open a merge PR when main cannot move forward on its own
         if: steps.diff.outputs.status == 'diverged' || (steps.diff.outputs.status == 'fast-forward' && steps.push.outputs.pushed == 'false')
         env:
           GH_TOKEN: ${{ github.token }}
           UPSTREAM_HEAD: ${{ steps.diff.outputs.upstream_head }}
+          SYNC_STATUS: ${{ steps.diff.outputs.status }}
         run: |
           set -euo pipefail
 
@@ -111,15 +136,26 @@ jobs:
             exit 0
           fi
 
+          # Build the branch so it carries both histories. Branching from
+          # upstream/main alone would produce a PR with no commits whenever
+          # main is ahead, which GitHub rejects.
+          git checkout -B "$branch" HEAD
+          if ! git merge --no-edit upstream/main; then
+            git merge --abort || true
+            echo "::error::main and upstream/main conflict; resolve the merge manually and push $branch."
+            exit 1
+          fi
+
+          # Safe to force: we only get here with no open PR on this branch.
           git push --force \
             "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            upstream/main:"refs/heads/$branch"
+            "HEAD:refs/heads/$branch"
 
           gh pr create \
             --base main \
             --head "$branch" \
             --draft \
             --title "chore: sync with sickn33/agentic-awesome-skills" \
-            --body "Brings \`main\` up to date with the canonical upstream repository, [sickn33/agentic-awesome-skills](https://github.com/sickn33/agentic-awesome-skills) (\`${UPSTREAM_HEAD}\`).
+            --body "Merges the canonical upstream repository, [sickn33/agentic-awesome-skills](https://github.com/sickn33/agentic-awesome-skills) (\`${UPSTREAM_HEAD}\`), into \`main\`.
 
-          Opened automatically by the Sync Upstream workflow because \`main\` could not be fast-forwarded directly (branch protection or local history that diverged from upstream). Review the diff before merging."
+          Opened automatically by the Sync Upstream workflow because \`main\` could not be fast-forwarded (sync status: \`${SYNC_STATUS}\`) — this fork carries its own commits, upstream has new ones, or branch protection blocked a direct push. Review the diff before merging."
