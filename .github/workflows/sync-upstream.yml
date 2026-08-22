@@ -71,11 +71,14 @@ jobs:
             status=diverged
           fi
 
-          echo "status=$status" >> "$GITHUB_OUTPUT"
-          echo "upstream_head=$upstream_head" >> "$GITHUB_OUTPUT"
-          # Recorded before any merge below moves HEAD, so later steps still
-          # know where main actually was.
-          echo "main_head=$local_head" >> "$GITHUB_OUTPUT"
+          {
+            echo "status=$status"
+            echo "upstream_head=$upstream_head"
+            # Recorded before any merge below moves HEAD, so later steps still
+            # know where main actually was.
+            echo "main_head=$local_head"
+          } >> "$GITHUB_OUTPUT"
+
           echo "Sync status: $status ($local_head -> $upstream_head)"
 
       - name: Report a no-op sync
