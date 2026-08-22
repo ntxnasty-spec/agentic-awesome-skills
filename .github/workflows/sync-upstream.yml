@@ -116,7 +116,7 @@ jobs:
           gh workflow run ci.yml --ref main \
             || echo "::warning::Could not dispatch ci.yml; run it manually against main."
 
-      - name: Open a merge PR when main cannot move forward on its own
+      - name: Open or refresh the merge PR when main cannot move forward
         if: steps.diff.outputs.status == 'diverged' || (steps.diff.outputs.status == 'fast-forward' && steps.push.outputs.pushed == 'false')
         env:
           GH_TOKEN: ${{ github.token }}
@@ -126,30 +126,47 @@ jobs:
           set -euo pipefail
 
           branch="automation/sync-upstream"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+          main_sha="$(git rev-parse HEAD)"
 
-          # Check before touching the branch: if a sync PR is already open, a
-          # maintainer may have resolved conflicts on it, and a force-push here
-          # would throw that work away.
-          state="$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)"
-          if [ "$state" = "OPEN" ]; then
-            echo "PR for $branch is already open; leaving the branch untouched."
+          # Build on top of whatever is already on the branch rather than
+          # replacing it: a maintainer may have resolved conflicts there, and
+          # those commits must survive. Starting from the existing tip also
+          # means the push below is always a fast-forward, so no force is
+          # needed and a concurrent update makes the push fail rather than
+          # silently win.
+          if git ls-remote --exit-code --heads "$remote" "$branch" >/dev/null 2>&1; then
+            git fetch "$remote" "refs/heads/$branch:refs/remotes/sync/$branch"
+            git checkout -B "$branch" "refs/remotes/sync/$branch"
+            echo "Refreshing existing $branch."
+          else
+            git checkout -B "$branch" "$main_sha"
+            echo "Creating $branch from main."
+          fi
+
+          # Merge main first so the branch stays a descendant of it, then the
+          # new upstream state. Branching from upstream/main alone would give a
+          # PR with no commits whenever main is ahead, which GitHub rejects.
+          for ref in "$main_sha" upstream/main; do
+            if ! git merge --no-edit "$ref"; then
+              git merge --abort || true
+              echo "::error::Merging $ref into $branch conflicts; resolve it manually and push $branch."
+              exit 1
+            fi
+          done
+
+          if git diff --quiet "$main_sha" HEAD; then
+            echo "$branch carries nothing that main does not already have; no PR needed."
             exit 0
           fi
 
-          # Build the branch so it carries both histories. Branching from
-          # upstream/main alone would produce a PR with no commits whenever
-          # main is ahead, which GitHub rejects.
-          git checkout -B "$branch" HEAD
-          if ! git merge --no-edit upstream/main; then
-            git merge --abort || true
-            echo "::error::main and upstream/main conflict; resolve the merge manually and push $branch."
-            exit 1
-          fi
+          git push "$remote" "HEAD:refs/heads/$branch"
 
-          # Safe to force: we only get here with no open PR on this branch.
-          git push --force \
-            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
-            "HEAD:refs/heads/$branch"
+          state="$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)"
+          if [ "$state" = "OPEN" ]; then
+            echo "Refreshed the branch behind the open sync PR."
+            exit 0
+          fi
 
           gh pr create \
             --base main \
