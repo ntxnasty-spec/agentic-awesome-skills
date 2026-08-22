@@ -10,6 +10,7 @@ on:
   workflow_dispatch:
 
 permissions:
+  actions: write
   contents: write
   pull-requests: write
 
@@ -27,6 +28,7 @@ jobs:
         with:
           fetch-depth: 0
           ref: main
+          persist-credentials: false
 
       - name: Configure git identity
         run: |
@@ -63,16 +65,32 @@ jobs:
       - name: Fast-forward main to upstream
         id: push
         if: steps.diff.outputs.status == 'fast-forward'
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
 
           git merge --ff-only upstream/main
-          if git push origin main; then
+
+          if git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
             echo "pushed=true" >> "$GITHUB_OUTPUT"
           else
             echo "::warning::Direct push to main was rejected (likely a protected branch); falling back to a pull request."
             echo "pushed=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # A push made with GITHUB_TOKEN does not start a new workflow run, so the
+      # push-triggered `main-validation-and-sync` job in ci.yml would never see
+      # this commit. Dispatch it explicitly instead.
+      - name: Run main validation on the synced commit
+        if: steps.push.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run ci.yml --ref main \
+            || echo "::warning::Could not dispatch ci.yml; run it manually against main."
 
       - name: Open a PR when a direct push isn't possible
         if: steps.diff.outputs.status == 'diverged' || (steps.diff.outputs.status == 'fast-forward' && steps.push.outputs.pushed == 'false')
@@ -83,13 +101,19 @@ jobs:
           set -euo pipefail
 
           branch="automation/sync-upstream"
-          git push origin --force upstream/main:"refs/heads/$branch"
 
+          # Check before touching the branch: if a sync PR is already open, a
+          # maintainer may have resolved conflicts on it, and a force-push here
+          # would throw that work away.
           state="$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)"
           if [ "$state" = "OPEN" ]; then
-            echo "PR for $branch is already open; branch updated in place."
+            echo "PR for $branch is already open; leaving the branch untouched."
             exit 0
           fi
+
+          git push --force \
+            "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            upstream/main:"refs/heads/$branch"
 
           gh pr create \
             --base main \
