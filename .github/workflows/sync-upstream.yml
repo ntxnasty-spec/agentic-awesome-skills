@@ -1,0 +1,192 @@
+name: Sync Upstream
+
+# Keeps this mirror's `main` in step with the canonical repository,
+# https://github.com/sickn33/agentic-awesome-skills. Runs daily and can
+# also be triggered manually from the Actions tab.
+#
+# Four states are possible, and they are all normal:
+#   up-to-date   main and upstream/main are the same commit -> nothing to do
+#   fast-forward upstream is strictly ahead                 -> push main forward
+#   local-ahead  this fork carries commits upstream lacks,
+#                and upstream has nothing new               -> nothing to do
+#   diverged     both sides have unique commits             -> merge PR for review
+#
+# Because this fork keeps its own commits (this workflow, for one), `diverged`
+# is the expected state whenever upstream moves; the fast-forward path only
+# applies while the fork carries no commits of its own.
+
+on:
+  schedule:
+    - cron: "30 4 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync-upstream:
+    if: github.repository == 'ntxnasty-spec/agentic-awesome-skills'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd # v5
+        with:
+          fetch-depth: 0
+          ref: main
+          persist-credentials: false
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch canonical upstream
+        run: |
+          set -euo pipefail
+
+          git remote add upstream https://github.com/sickn33/agentic-awesome-skills.git
+          git fetch upstream main
+
+      - name: Compare against upstream
+        id: diff
+        run: |
+          set -euo pipefail
+
+          upstream_head="$(git rev-parse upstream/main)"
+          local_head="$(git rev-parse HEAD)"
+
+          if [ "$upstream_head" = "$local_head" ]; then
+            status=up-to-date
+          elif git merge-base --is-ancestor HEAD upstream/main; then
+            status=fast-forward
+          elif git merge-base --is-ancestor upstream/main HEAD; then
+            status=local-ahead
+          else
+            status=diverged
+          fi
+
+          {
+            echo "status=$status"
+            echo "upstream_head=$upstream_head"
+            # Recorded before any merge below moves HEAD, so later steps still
+            # know where main actually was.
+            echo "main_head=$local_head"
+          } >> "$GITHUB_OUTPUT"
+
+          echo "Sync status: $status ($local_head -> $upstream_head)"
+
+      - name: Report a no-op sync
+        if: steps.diff.outputs.status == 'up-to-date' || steps.diff.outputs.status == 'local-ahead'
+        run: |
+          set -euo pipefail
+
+          if [ "${{ steps.diff.outputs.status }}" = "up-to-date" ]; then
+            echo "main already matches upstream; nothing to sync."
+          else
+            echo "main carries commits upstream does not have, and upstream has nothing new; nothing to sync."
+          fi
+
+      - name: Fast-forward main to upstream
+        id: push
+        if: steps.diff.outputs.status == 'fast-forward'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          git merge --ff-only upstream/main
+
+          if git push "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" HEAD:main; then
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "::warning::Direct push to main was rejected (likely a protected branch); falling back to a pull request."
+            echo "pushed=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      # A push made with GITHUB_TOKEN does not start a new workflow run, so the
+      # push-triggered `main-validation-and-sync` job in ci.yml would never see
+      # this commit. Dispatch it explicitly instead.
+      - name: Run main validation on the synced commit
+        if: steps.push.outputs.pushed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+
+          gh workflow run ci.yml --ref main \
+            || echo "::warning::Could not dispatch ci.yml; run it manually against main."
+
+      - name: Open or refresh the merge PR when main cannot move forward
+        if: steps.diff.outputs.status == 'diverged' || (steps.diff.outputs.status == 'fast-forward' && steps.push.outputs.pushed == 'false')
+        env:
+          GH_TOKEN: ${{ github.token }}
+          UPSTREAM_HEAD: ${{ steps.diff.outputs.upstream_head }}
+          SYNC_STATUS: ${{ steps.diff.outputs.status }}
+          MAIN_SHA: ${{ steps.diff.outputs.main_head }}
+        run: |
+          set -euo pipefail
+
+          branch="automation/sync-upstream"
+          remote="https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git"
+
+          # Deliberately not `git rev-parse HEAD`: on a rejected fast-forward
+          # push HEAD has already been moved to upstream/main by the step
+          # above, which would make the branch below look empty and skip the
+          # PR entirely. This is where main actually is.
+          main_sha="$MAIN_SHA"
+
+          # Build on top of whatever is already on the branch rather than
+          # replacing it: a maintainer may have resolved conflicts there, and
+          # those commits must survive. Starting from the existing tip also
+          # means the push below is always a fast-forward, so no force is
+          # needed and a concurrent update makes the push fail rather than
+          # silently win.
+          if git ls-remote --exit-code --heads "$remote" "$branch" >/dev/null 2>&1; then
+            git fetch "$remote" "refs/heads/$branch:refs/remotes/sync/$branch"
+            git checkout -B "$branch" "refs/remotes/sync/$branch"
+            echo "Refreshing existing $branch."
+          else
+            git checkout -B "$branch" "$main_sha"
+            echo "Creating $branch from main."
+          fi
+
+          # Merge main first so the branch stays a descendant of it, then the
+          # new upstream state. Branching from upstream/main alone would give a
+          # PR with no commits whenever main is ahead, which GitHub rejects.
+          for ref in "$main_sha" upstream/main; do
+            if ! git merge --no-edit "$ref"; then
+              git merge --abort || true
+              echo "::error::Merging $ref into $branch conflicts; resolve it manually and push $branch."
+              exit 1
+            fi
+          done
+
+          # Count commits, not tree content: GitHub rejects a PR with no
+          # commits, and two histories can share a tree while still differing.
+          if [ "$(git rev-list --count "$main_sha..HEAD")" -eq 0 ]; then
+            echo "$branch carries no commits that main does not already have; no PR needed."
+            exit 0
+          fi
+
+          git push "$remote" "HEAD:refs/heads/$branch"
+
+          state="$(gh pr view "$branch" --json state -q .state 2>/dev/null || true)"
+          if [ "$state" = "OPEN" ]; then
+            echo "Refreshed the branch behind the open sync PR."
+            exit 0
+          fi
+
+          gh pr create \
+            --base main \
+            --head "$branch" \
+            --draft \
+            --title "chore: sync with sickn33/agentic-awesome-skills" \
+            --body "Merges the canonical upstream repository, [sickn33/agentic-awesome-skills](https://github.com/sickn33/agentic-awesome-skills) (\`${UPSTREAM_HEAD}\`), into \`main\`.
+
+          Opened automatically by the Sync Upstream workflow because \`main\` could not be fast-forwarded (sync status: \`${SYNC_STATUS}\`) — this fork carries its own commits, upstream has new ones, or branch protection blocked a direct push. Review the diff before merging."
