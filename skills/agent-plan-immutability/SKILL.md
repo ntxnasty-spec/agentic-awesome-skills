@@ -48,6 +48,55 @@ Keep these four fixed for the rest of the design. A control that checks a differ
 - Treat resolution and dereferencing consistently: if the plan is passed by reference (a URL, object key, or handle), the executor must fetch the referenced content and hash *that*, not trust a digest field carried alongside the reference — a caller can supply a stale reference next to a fresh, false digest.
 - Log the digest actually executed, alongside the approval it satisfied, in the run record. This is what lets a later audit answer "did the plan that ran match the plan that was reviewed?" without re-deriving it from partial traces.
 
+## Worked Example
+
+`scripts/toctou_fixture.py` is a disposable, inert fixture that reproduces the gap end to end: it builds a synthetic plan, binds a digest to it, applies a post-approval mutation under the same label, then dispatches through two consumers. Run it with `python3 scripts/toctou_fixture.py`.
+
+Canonicalize only the fields that change behavior, so equal behavior yields equal bytes:
+
+```python
+BOUND_FIELDS = ("step_id", "tool", "arguments", "resources")
+
+def canonical_bytes(plan):
+    core = {
+        "plan_kind": plan["plan_kind"],
+        "steps": [{k: s[k] for k in BOUND_FIELDS} for s in plan["steps"]],
+    }
+    return json.dumps(core, sort_keys=True, separators=(",", ":")).encode("utf-8")
+```
+
+The two consumers differ by one comparison. The first trusts an attribute carried on the object; the second recomputes over the bytes it actually holds:
+
+```python
+# Vulnerable: the gate is a flag that rides along with the mutation.
+plan = store.resolve(receipt.label)
+if not plan.get("approved"):
+    return refuse("not approved")
+dispatch(plan)
+
+# Correct: the gate is the content itself, checked at the dispatch boundary.
+plan = store.resolve(receipt.label)
+observed = plan_digest(plan)
+if observed != receipt.approved_digest:
+    return refuse("digest mismatch", diff=diff_steps(receipt, plan))
+dispatch(plan)
+```
+
+With a mutation that broadens step `s1` from one record to a wildcard and appends an unreviewed export step, the fixture reports:
+
+```text
+LabelResolvingConsumer   -> dispatched
+  steps_fired: fixture.read(['fixture://records/*'])
+               fixture.summarize(['fixture://records/alpha'])
+               fixture.export(['fixture://records/*'])
+
+DigestVerifyingConsumer  -> refused (digest mismatch)
+  s1.resources: ['fixture://records/alpha'] -> ['fixture://records/*']
+  s3: step inserted (tool=fixture.export)
+```
+
+The label resolver fires three steps when two were approved, including an export the reviewer never saw. Both consumers read the identical store; the only difference is whether the check runs against content or against a name.
+
 ## Handling Legitimate Post-Approval Changes
 
 A real need to change an approved plan is common — a resource moved, an argument needs a fix, a step should be dropped. Route every such change through the same approval path the original plan used, producing a new digest and a new approval, rather than a privileged "patch" path that mutates the approved object. Fast-tracking a re-approval (e.g., delta review against the prior digest) is reasonable; skipping it because the change looks small is the exact failure this skill exists to prevent.
