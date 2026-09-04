@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "kiasumiles": {
+      "type": "http",
+      "url": "https://kiasumiles.space/mcp"
+    }
+  }
+}
