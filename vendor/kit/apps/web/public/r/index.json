@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "name": "agentcn",
+  "homepage": "https://agentcn.dev",
+  "items": [
+    {
+      "name": "web-agent",
+      "description": "Web research agent with search, answer, deep research, browser automation (Anchor), and websets via Exa.",
+      "categories": [
+        "web",
+        "research",
+        "browser"
+      ]
+    },
+    {
+      "name": "extraction-agent",
+      "description": "Extract information from PDFs, spreadsheets, and images with citations, then save results locally.",
+      "categories": [
+        "extraction",
+        "documents",
+        "spreadsheets"
+      ]
+    },
+    {
+      "name": "ecommerce-agent",
+      "description": "Extract structured product, pricing, and inventory data from any public e-commerce site with Firecrawl.",
+      "categories": [
+        "web",
+        "ecommerce",
+        "scraping"
+      ]
+    }
+  ]
+}

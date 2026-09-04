@@ -1,0 +1,20 @@
+{
+  "extends": "./tsconfig.base.json",
+  "compileOnSave": false,
+  "files": [],
+  "references": [
+    {
+      "path": "./apps/web"
+    }
+  ],
+  "compilerOptions": {
+    "paths": {
+      "@/agents/*": [
+        "./ai/agents/*"
+      ],
+      "@/tools/*": [
+        "./ai/tools/*"
+      ]
+    }
+  }
+}

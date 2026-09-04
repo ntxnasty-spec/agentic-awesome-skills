@@ -4,3 +4,6 @@ paths-ignore:
   # Generated plugin mirrors create duplicate scan noise without adding
   # source coverage because the canonical sources live outside plugins/.
   - "plugins/**"
+  # Vendored third-party repositories under vendor/ are upstream-owned sources;
+  # findings there are not actionable in this repository and belong upstream.
+  - "vendor/**"
