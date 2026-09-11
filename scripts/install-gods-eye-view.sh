@@ -10,8 +10,8 @@
 #   ./install-gods-eye-view.sh --dir ~/apps/gev
 #
 # Node goes into ~/.nvm via nvm, so nothing touches system directories and no
-# existing Node install is replaced. git is the only step that may use sudo,
-# and only if git is genuinely missing.
+# existing Node install is replaced -- an nvm default you already chose is left
+# alone. git is the only step that may use sudo, and only if git is missing.
 
 set -euo pipefail
 
@@ -28,14 +28,16 @@ BOLD=$'\033[1m'; DIM=$'\033[2m'; RED=$'\033[31m'; GRN=$'\033[32m'; YEL=$'\033[33
 step() { printf '%s==>%s %s\n' "$BOLD" "$RST" "$*"; }
 ok()   { printf '%s  ok%s %s\n' "$GRN" "$RST" "$*"; }
 warn() { printf '%swarn%s %s\n' "$YEL" "$RST" "$*" >&2; }
-die()  { printf '%s fail%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
+die()  { printf '%sfail%s %s\n' "$RED" "$RST" "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --no-start) START=0; shift ;;
     --dir) INSTALL_DIR="${2:?--dir needs a path}"; shift 2 ;;
-    -h|--help) sed -n '2,20p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+    # Print the header comment block: everything after the shebang, up to the
+    # first line that is not a comment.
+    -h|--help) awk 'NR==1{next} !/^#/{exit} {sub(/^#[[:space:]]?/,""); print}' "$0"; exit 0 ;;
     *) die "unknown option: $1" ;;
   esac
 done
