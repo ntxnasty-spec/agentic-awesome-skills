@@ -76,10 +76,11 @@ fi
 
 # --------------------------------------------------------------------- node --
 # The project requires Node >=24.14 <25 or >=26 <27. Node 25 works but is EOL.
-node_verdict() {
-  local v maj min
-  v="$(node -v 2>/dev/null | sed 's/^v//')" || return 2
+# 0 = supported, 1 = usable but end-of-life, 2 = unsupported or unreadable.
+version_verdict() {
+  local v="${1#v}" maj min
   [ -n "$v" ] || return 2
+  case "$v" in *[!0-9.]*) return 2 ;; esac   # "N/A", "none", anything unparseable
   maj="${v%%.*}"; min="${v#*.}"; min="${min%%.*}"
   if   [ "$maj" -eq 24 ] && [ "$min" -ge 14 ]; then return 0
   elif [ "$maj" -eq 26 ]; then return 0
@@ -87,6 +88,12 @@ node_verdict() {
   else return 2                            # too old / too new
   fi
 }
+
+node_verdict() { version_verdict "$(node -v 2>/dev/null)"; }
+
+# What a brand-new shell would land on. Note `nvm alias default` exits 0 even
+# with no alias set, so it cannot answer this -- resolve the version instead.
+nvm_default_verdict() { version_verdict "$(nvm version default 2>/dev/null)"; }
 
 load_nvm() {
   export NVM_DIR="${NVM_DIR:-$HOME/.nvm}"
@@ -98,6 +105,7 @@ load_nvm() {
 }
 
 step "Checking Node.js"
+NODE_VIA_NVM=0          # this run needs nvm to supply Node
 load_nvm
 set +e; node_verdict; verdict=$?; set -e
 if [ "$verdict" -eq 0 ]; then
@@ -108,7 +116,9 @@ else
   current="$(node -v 2>/dev/null || echo 'none')"
   warn "Node $current does not meet the requirement (>=24.14) -- installing $NODE_VERSION via nvm"
 
+  nvm_was_present=1
   if [ ! -s "${NVM_DIR:-$HOME/.nvm}/nvm.sh" ]; then
+    nvm_was_present=0
     step "Installing nvm $NVM_VERSION into ${NVM_DIR:-$HOME/.nvm}"
     curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/$NVM_VERSION/install.sh" | bash \
       || die "nvm install failed."
@@ -116,9 +126,25 @@ else
   load_nvm
   have nvm || die "nvm installed but could not be loaded. Open a new shell and re-run."
 
+  # Whether the user already chose a default, recorded BEFORE `nvm install` --
+  # nvm writes this alias itself when none exists.
+  nvm_had_default=0
+  [ -f "${NVM_DIR:-$HOME/.nvm}/alias/default" ] && nvm_had_default=1
+
   nvm install "$NODE_VERSION" || die "Could not install Node $NODE_VERSION."
   nvm use "$NODE_VERSION" >/dev/null
-  nvm alias default "$NODE_VERSION" >/dev/null 2>&1 || true
+  NODE_VIA_NVM=1
+
+  # Claim nvm's "default" alias only when that takes nothing away -- we just
+  # installed nvm ourselves, or the user had chosen no default. Overwriting an
+  # existing default would silently change the Node version of every new shell,
+  # which is someone else's setup to decide.
+  if [ "$nvm_was_present" -eq 0 ] || [ "$nvm_had_default" -eq 0 ]; then
+    nvm alias default "$NODE_VERSION" >/dev/null 2>&1 || true
+  else
+    warn "Left your existing nvm default alias unchanged."
+  fi
+
   set +e; node_verdict; verdict=$?; set -e
   [ "$verdict" -le 1 ] || die "Node is still wrong after install: $(node -v)"
   ok "Node $(node -v) (via nvm)"
@@ -156,15 +182,16 @@ npm run doctor || warn "The doctor reported findings -- the app usually still st
 
 # -------------------------------------------------------------------- start --
 if [ "$START" -eq 0 ]; then
-  cat <<EOF
-
-${BOLD}Ready.${RST} Start it whenever you like:
-
-  cd $INSTALL_DIR
-  npm run dev
-
-Then open http://localhost:$PORT
-EOF
+  printf '\n%sReady.%s Start it whenever you like:\n\n  cd %s\n' "$BOLD" "$RST" "$INSTALL_DIR"
+  # A new shell only gets the right Node if nvm's default resolves to one.
+  if [ "$NODE_VIA_NVM" -eq 1 ]; then
+    set +e; nvm_default_verdict; default_verdict=$?; set -e
+    if [ "$default_verdict" -gt 1 ]; then
+      printf '  nvm use %s   %s# a new shell would otherwise use an older Node%s\n' \
+        "$NODE_VERSION" "$DIM" "$RST"
+    fi
+  fi
+  printf '  npm run dev\n\nThen open http://localhost:%s\n' "$PORT"
   exit 0
 fi
 
